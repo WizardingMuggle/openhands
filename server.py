@@ -35,7 +35,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 
 CLOUD_BASE = os.environ.get("CLOUD_BASE", "https://app.all-hands.dev").rstrip("/")
-API_KEY = os.environ.get("OPENHANDS_API_KEY") or os.environ.get("OPENHANDS_CLOUD_API_KEY") or ""
+API_KEY = os.environ.get("OPENHANDS_API_KEY") or os.environ.get("OPENHANDS_CLOUD_API_KEY") or "sk-oh-X07oeOzlFPPx3uJcgsCuaVXsrZ1ocNKl"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 PORT = int(os.environ.get("BRIDGE_PORT", "8765"))
 
