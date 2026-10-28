@@ -32,6 +32,11 @@
     background: #4f7cff; color: #fff; font: inherit; font-weight: 600; cursor: pointer;
   }
   button:disabled { opacity: .55; cursor: not-allowed; }
+  .counter { display: flex; align-items: center; gap: 12px; margin-bottom: 22px;
+             padding: 14px 16px; border: 1px solid #262b36; border-radius: 12px; background: #0f1319; }
+  .counter button { margin-top: 0; width: auto; padding: 9px 16px; }
+  .counter .count { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .counter .hint { color: #98a2b3; font-size: 12px; }
   .status { margin-top: 22px; border-top: 1px solid #262b36; padding-top: 18px; font-size: 14px; }
   .status:empty { display: none; }
   .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px;
@@ -48,6 +53,12 @@
   <main class="card">
     <h1>Button to Pull Request</h1>
     <p class="sub">Pressing the button starts an OpenHands Cloud run against your repo and reports the PR back here.</p>
+
+    <section class="counter">
+      <button id="counter" type="button">Count</button>
+      <span class="count" id="count">0</span>
+      <span class="hint">resets when you refresh</span>
+    </section>
 
     <label for="repo">Repository (owner/name)</label>
     <input id="repo" placeholder="octocat/hello-world" autocomplete="off" />
@@ -70,6 +81,13 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let pollTimer = null;
+
+// In-memory only: no storage, so a page refresh starts back at 0.
+let count = 0;
+$("counter").addEventListener("click", () => {
+  count += 1;
+  $("count").textContent = count;
+});
 
 function badgeClass(status) {
   if (status === "pr_found" || status === "finished") return "badge ok";
