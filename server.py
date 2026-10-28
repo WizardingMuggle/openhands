@@ -48,6 +48,11 @@ PR_PATTERNS = [
     re.compile(r"https?://[\w.-]+/[\w./-]+/-/merge_requests/\d+"),
 ]
 
+# Only these event kinds describe what the agent actually did. State/system
+# events (e.g. ConversationStateUpdateEvent) carry the full conversation config,
+# whose loaded skill documentation contains example PR URLs from unrelated repos.
+AGENT_EVENT_KINDS = {"MessageEvent", "ActionEvent", "ObservationEvent"}
+
 
 def build_ssl_context() -> ssl.SSLContext:
     """Return a verifying SSL context, preferring certifi's CA bundle.
@@ -118,12 +123,14 @@ def first_item(data: Any) -> dict:
     return {}
 
 
+def find_pr_urls(text: str) -> list[str]:
+    """All PR/MR URLs in text, in order of appearance."""
+    return [m.group(0) for pattern in PR_PATTERNS for m in pattern.finditer(text)]
+
+
 def extract_pr_url(text: str) -> str | None:
-    for pattern in PR_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            return match.group(0)
-    return None
+    urls = find_pr_urls(text)
+    return urls[0] if urls else None
 
 
 def pr_url_from_record(record: dict, conversation_id: str) -> str | None:
@@ -144,19 +151,34 @@ def pr_url_from_record(record: dict, conversation_id: str) -> str | None:
     return None
 
 
-def scan_events_for_pr(conversation_id: str) -> str | None:
-    """Fallback: look for a PR URL in the recent conversation events.
+def scan_events_for_pr(conversation_id: str, expected_repo: str | None = None) -> str | None:
+    """Fallback: look for a PR URL in what the agent actually produced.
+
+    Two filters prevent false positives:
+    - only agent-originated event kinds are scanned, so config/state blobs (whose
+      loaded skill docs contain example PR URLs) are ignored;
+    - when expected_repo is given, only links to that repository are accepted.
 
     The events endpoint caps limit at 100.
     """
     data = api_request(
         "GET", f"/conversation/{conversation_id}/events/search?limit=100"
     )
-    for event in data.get("items", []) if isinstance(data, dict) else []:
-        found = extract_pr_url(json.dumps(event))
-        if found:
-            return found
+    if not isinstance(data, dict):
+        return None
+    for event in data.get("items", []):
+        if event.get("kind") not in AGENT_EVENT_KINDS:
+            continue
+        for url in find_pr_urls(json.dumps(event)):
+            if expected_repo and not _url_matches_repo(url, expected_repo):
+                continue
+            return url
     return None
+
+
+def _url_matches_repo(url: str, repo: str) -> bool:
+    """True if the PR/MR URL belongs to repo (owner/name)."""
+    return f"/{repo}/" in url or url.rstrip("/").endswith(f"/{repo}")
 
 
 def set_state(run_id: str, **fields) -> None:
@@ -226,7 +248,7 @@ def run_worker(run_id: str, prompt: str, repo: str, branch: str | None) -> None:
             )
 
             pr_url = pr_url_from_record(record, conversation_id) or scan_events_for_pr(
-                conversation_id
+                conversation_id, expected_repo=repo
             )
             if pr_url:
                 set_state(run_id, status="pr_found", pr_url=pr_url)

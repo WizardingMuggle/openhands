@@ -100,6 +100,11 @@ with the python.org installer (in `/Applications/Python 3.x/`).
 - Each press starts one conversation, which creates a sandbox and costs money.
   The bridge does not retry on failure.
 - Run state is in memory; restarting the bridge clears it.
-- The bridge polls for up to 30 minutes and looks at the last 100 conversation
-  events for the PR URL (the API caps this limit at 100).
+- The bridge polls for up to 30 minutes. It prefers the conversation record's
+  `pr_number` field, which is authoritative. As a fallback it scans only
+  agent-produced events (messages, actions, observations) and accepts a link
+  only if it points at the repository you asked for. Conversation state events
+  are deliberately excluded because they embed the full agent config, whose
+  loaded skill documentation contains example PR URLs from unrelated repos.
+- The events endpoint caps `limit` at 100, which is what the fallback uses.
 - The bridge binds to `127.0.0.1`, so it is only reachable from your machine.
