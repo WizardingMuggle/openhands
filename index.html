@@ -42,12 +42,26 @@
   a { color: #7aa2ff; }
   .kv { margin-top: 10px; color: #98a2b3; font-size: 13px; }
   code { background: #0f1319; padding: 2px 6px; border-radius: 6px; }
+  .counter { display: flex; align-items: center; gap: 16px; padding: 16px;
+             border: 1px solid #262b36; border-radius: 12px; background: #12151c; }
+  .counter .count { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 48px; }
+  .counter .meta { flex: 1; }
+  .counter .meta .hint { margin: 0; color: #98a2b3; font-size: 12px; }
+  .counter button { margin-top: 0; width: auto; padding: 10px 20px; white-space: nowrap; }
 </style>
 </head>
 <body>
   <main class="card">
     <h1>Button to Pull Request</h1>
     <p class="sub">Pressing the button starts an OpenHands Cloud run against your repo and reports the PR back here.</p>
+
+    <section class="counter" aria-labelledby="counter-label">
+      <div class="count" id="click-count" aria-live="polite">0</div>
+      <div class="meta">
+        <p class="hint" id="counter-label">Clicks this session (resets on refresh)</p>
+      </div>
+      <button id="click-btn" type="button">Click me</button>
+    </section>
 
     <label for="repo">Repository (owner/name)</label>
     <input id="repo" placeholder="octocat/hello-world" autocomplete="off" />
@@ -70,6 +84,15 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let pollTimer = null;
+
+// Session-only counter. Held in a plain variable, never in storage, so a
+// page refresh always restarts it at 0.
+let clickCount = 0;
+
+$("click-btn").addEventListener("click", () => {
+  clickCount += 1;
+  $("click-count").textContent = String(clickCount);
+});
 
 function badgeClass(status) {
   if (status === "pr_found" || status === "finished") return "badge ok";

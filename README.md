@@ -1,8 +1,9 @@
 # Button to Pull Request
 
-A tiny local web app with one button. Pressing it starts an OpenHands Cloud run
-against a repository of your choice and reports the opened pull request back on
-the page.
+A tiny local web app. A click counter at the top of the page tracks how many
+times you pressed it during the current session (it starts at 0 and resets on
+refresh). The main button starts an OpenHands Cloud run against a repository of
+your choice and reports the opened pull request back on the page.
 
 ```
 your browser  ->  local bridge (server.py, port 8765)  ->  OpenHands Cloud API
