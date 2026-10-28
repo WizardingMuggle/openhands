@@ -75,6 +75,26 @@ If your app runs on a different origin, add a CORS header to the bridge or proxy
 | GET    | `/api/status/{id}`   | Current status of a run, including `pr_url`.        |
 | GET    | `/api/health`        | Whether the API key and GitHub token are configured.|
 
+## Troubleshooting
+
+### `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`
+
+Python from python.org on macOS ships without a CA trust store, so every HTTPS
+call fails verification. Fix it in one of these ways:
+
+```bash
+pip install certifi          # the bridge picks this up automatically
+```
+
+or point Python at a CA bundle you already have:
+
+```bash
+export SSL_CERT_FILE=/etc/ssl/cert.pem   # macOS: also try $(brew --prefix)/etc/ca-certificates/cert.pem
+```
+
+Alternatively, run the macOS "Install Certificates.command" script that ships
+with the python.org installer (in `/Applications/Python 3.x/`).
+
 ## Notes and limits
 
 - Each press starts one conversation, which creates a sandbox and costs money.

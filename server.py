@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
 import sys
 import threading
 import time
@@ -48,6 +49,27 @@ PR_PATTERNS = [
 ]
 
 
+def build_ssl_context() -> ssl.SSLContext:
+    """Return a verifying SSL context, preferring certifi's CA bundle.
+
+    Python from python.org on macOS ships without a CA trust store, so HTTPS
+    fails with CERTIFICATE_VERIFY_FAILED. certifi (or an explicit SSL_CERT_FILE)
+    provides the missing roots.
+    """
+    env_file = os.environ.get("SSL_CERT_FILE")
+    if env_file and os.path.exists(env_file):
+        return ssl.create_default_context(cafile=env_file)
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+SSL_CONTEXT = build_ssl_context()
+
+
 class ApiError(RuntimeError):
     def __init__(self, status: int, body: str):
         super().__init__(f"HTTP {status}: {body[:500]}")
@@ -69,13 +91,21 @@ def api_request(
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as resp:
             raw = resp.read().decode()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         raise ApiError(exc.code, exc.read().decode(errors="replace")) from None
     except urllib.error.URLError as exc:
-        raise ApiError(0, f"Could not reach {url}: {exc.reason}") from None
+        reason = exc.reason
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            raise ApiError(
+                0,
+                "TLS certificate verification failed. Python has no CA trust store. "
+                "Fix: pip install certifi, or set SSL_CERT_FILE to a CA bundle "
+                f"(original: {reason}).",
+            ) from None
+        raise ApiError(0, f"Could not reach {url}: {reason}") from None
 
 
 def first_item(data: Any) -> dict:
