@@ -125,6 +125,11 @@ with the python.org installer (in `/Applications/Python 3.x/`).
 - Each press starts one conversation, which creates a sandbox and costs money.
   The bridge does not retry on failure.
 - Run state is in memory; restarting the bridge clears it.
+- While the sandbox is starting, the page shows the setup phase (for example
+  `SETTING_UP_SKILLS`, `PREPARING_REPOSITORY`). If the sandbox cannot start, the
+  bridge reports the reason right away instead of waiting for the 30 minute
+  timeout. The most common reason is a missing or rejected token: Azure DevOps
+  always needs one, and private GitHub repositories do too.
 - The bridge polls for up to 30 minutes. It prefers the conversation record's
   `pr_number` field, which is authoritative, and builds the PR URL from the
   provider (`github` -> `/pull/`, `azure_devops` -> `/_git/.../pullrequest/`).

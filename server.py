@@ -148,11 +148,13 @@ def api_request(
 def first_item(data: Any) -> dict:
     """Batch endpoints with ids= return a bare list; search endpoints return {items: [...]}."""
     if isinstance(data, list):
-        return data[0] if data else {}
-    if isinstance(data, dict):
+        item = data[0] if data else None
+    elif isinstance(data, dict):
         items = data.get("items") or []
-        return items[0] if items else {}
-    return {}
+        item = items[0] if items else None
+    else:
+        item = None
+    return item if isinstance(item, dict) else {}
 
 
 def http_json(
@@ -387,10 +389,34 @@ def run_worker(
                         "GET", f"/app-conversations/start-tasks?ids={start_task_id}"
                     )
                 )
+                task_status = task.get("status")
                 conversation_id = task.get("app_conversation_id")
                 if conversation_id:
                     set_state(run_id, conversation_id=conversation_id, status="starting")
+                elif task_status == "ERROR":
+                    # The sandbox never came up (e.g. the provider rejected the
+                    # token, or the repository could not be cloned). The detail
+                    # field carries the reason; surface it instead of waiting.
+                    detail = task.get("detail") or (
+                        "The conversation failed to start (start task reported ERROR)."
+                    )
+                    if not token and (
+                        "auth" in detail.lower() or "remote url" in detail.lower()
+                    ):
+                        detail += (
+                            f" No token was provided for {provider}. Add a personal "
+                            "access token in the page, or set the matching environment "
+                            "variable on the server."
+                        )
+                    set_state(run_id, status="error", error=detail)
+                    return
                 else:
+                    set_state(
+                        run_id,
+                        status="starting",
+                        start_task_status=task_status,
+                        start_task_detail=task.get("detail"),
+                    )
                     continue
 
             record = first_item(

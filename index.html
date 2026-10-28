@@ -172,6 +172,9 @@ function badgeClass(status) {
 function render(run) {
   const el = $("status");
   const bits = [`<span class="${badgeClass(run.status)}">${run.status}</span>`];
+  if (run.status === "starting" && run.start_task_status) {
+    bits.push(`setup: ${run.start_task_status}`);
+  }
   if (run.execution_status && run.status === "running") bits.push(`execution: ${run.execution_status}`);
   if (run.error) bits.push(`<div class="kv" style="color:#f87171">${run.error}</div>`);
   if (run.conversation_ui_url) {
