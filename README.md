@@ -95,6 +95,11 @@ export SSL_CERT_FILE=/etc/ssl/cert.pem   # macOS: also try $(brew --prefix)/etc/
 Alternatively, run the macOS "Install Certificates.command" script that ships
 with the python.org installer (in `/Applications/Python 3.x/`).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, offline checks, and style
+guidelines.
+
 ## Notes and limits
 
 - Each press starts one conversation, which creates a sandbox and costs money.
