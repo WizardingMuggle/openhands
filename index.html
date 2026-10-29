@@ -89,6 +89,8 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+// Holds the pending setTimeout id so a new poll (or a finished run) can cancel
+// the previous one instead of stacking overlapping requests.
 let pollTimer = null;
 
 const PROVIDERS = {
@@ -108,6 +110,8 @@ const PROVIDERS = {
   },
 };
 
+// Repaint the labels and hints for the selected provider and drop any branches
+// loaded for the previous one, since branch names are provider-specific.
 function applyProvider() {
   const cfg = PROVIDERS[$("provider").value];
   $("repo").placeholder = cfg.repoPlaceholder;
@@ -137,6 +141,8 @@ function renderBranches(branches) {
     : "No branches found. The agent will use the repository default branch.";
 }
 
+// Ask the bridge to list branches for the current provider/repo/token. The token
+// travels in the POST body, never the URL, so it stays out of access logs.
 async function loadBranches() {
   const provider = $("provider").value;
   const repo = $("repo").value.trim();
@@ -163,6 +169,8 @@ async function loadBranches() {
   }
 }
 
+// Map a run status onto one of the three badge colours: green when the run
+// succeeded, red for the failure states, amber for anything still in progress.
 function badgeClass(status) {
   if (status === "pr_found" || status === "finished") return "badge ok";
   if (status === "error" || status === "stuck" || status === "timeout" || status === "stopped") return "badge err";
@@ -186,6 +194,9 @@ function render(run) {
   el.innerHTML = bits.join(" ");
 }
 
+// Poll the bridge until the run reaches a terminal status. Statuses that keep
+// the run alive poll again after 3s; a transport error backs off to 5s so a
+// dropped connection does not hammer the server.
 function poll(runId) {
   clearTimeout(pollTimer);
   fetch(`/api/status/${runId}`)
@@ -215,6 +226,8 @@ $("go").addEventListener("click", async () => {
     $("status").innerHTML = '<span class="badge err">error</span> repo and instruction are required';
     return;
   }
+  // Disable the button for the duration of the run so one press maps to one
+  // conversation (and one billable sandbox).
   $("go").disabled = true;
   $("status").innerHTML = '<span class="badge running">queued</span>';
   try {
