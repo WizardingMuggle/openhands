@@ -182,6 +182,9 @@ def _github_branches(repo: str, token: str) -> list[str]:
     )
     if status == 200 and isinstance(data, list):
         return [b["name"] for b in data if isinstance(b, dict) and b.get("name")]
+    # A rejected token is worth surfacing; anything else (404 for a private repo
+    # the token cannot see, rate limiting) returns empty so the caller can fall
+    # back to OpenHands Cloud's linked credentials.
     if token and status in (401, 403):
         raise ApiError(status, "GitHub rejected the token while listing branches.")
     return []
@@ -192,6 +195,7 @@ def _azure_branches(repo: str, token: str) -> list[str]:
     if len(parts) != 3:
         raise ApiError(400, "Azure DevOps repo must be organization/project/repository")
     org, project, name = parts
+    # Azure DevOps accepts a PAT as HTTP Basic auth with an empty username.
     auth = base64.b64encode(f":{token}".encode()).decode()
     url = (
         f"https://dev.azure.com/{org}/{project}/_apis/git/repositories/"
@@ -257,6 +261,8 @@ def list_branches(provider: str, repo: str, token: str) -> list[str]:
 
 def find_pr_urls(text: str) -> list[str]:
     """All PR/MR URLs in text, in order of appearance."""
+    # Each pattern is applied to the whole text before moving to the next, so the
+    # result is grouped by provider rather than truly ordered by position.
     return [m.group(0) for pattern in PR_PATTERNS for m in pattern.finditer(text)]
 
 
@@ -269,6 +275,8 @@ def pr_url_from_record(record: dict, conversation_id: str) -> str | None:
     """Prefer the structured pr_number field over scanning event text."""
     raw = record.get("pr_number")
     if isinstance(raw, list):
+        # The field accumulates one entry per PR the agent opened, so the last
+        # element is the most recent one.
         number = raw[-1] if raw else None
     else:
         number = raw
@@ -331,11 +339,14 @@ def _url_matches_repo(url: str, repo: str, provider: str | None = None) -> bool:
     inserts /_git/ between the project and the repository.
     """
     parts = repo.split("/")
+    # A three-part repo is unambiguously Azure DevOps, so trust the shape when the
+    # provider is missing rather than guessing GitHub.
     if provider == "azure_devops" or len(parts) == 3:
         if len(parts) != 3:
             return False
         org, project, name = parts
         return f"/{org}/{project}/_git/{name}/" in url
+    # Trailing-slash variant covers URLs that end at the repo with no PR segment.
     return f"/{repo}/" in url or url.rstrip("/").endswith(f"/{repo}")
 
 
@@ -349,6 +360,8 @@ def set_state(run_id: str, **fields) -> None:
 def get_state(run_id: str) -> dict | None:
     with RUNS_LOCK:
         run = RUNS.get(run_id)
+        # Return a snapshot: the worker thread keeps mutating the live dict, and
+        # the handler serialises this copy after the lock is released.
         return dict(run) if run else None
 
 
@@ -363,6 +376,8 @@ def run_worker(
             "title": f"[bridge] {repo}",
         }
         if branch:
+            # Omit the field entirely when unset so Cloud falls back to the
+            # repository's default branch.
             payload["selected_branch"] = branch
         if token:
             # Forward the provider token to the sandbox so the agent can clone and
@@ -381,6 +396,9 @@ def run_worker(
         )
 
         deadline = time.time() + 60 * 30  # 30 minute ceiling
+        # Two phases share one loop. Until the sandbox reports a conversation id
+        # we poll the start task; after that we poll the conversation record. The
+        # sleep leads so the first check gives Cloud a moment to register the run.
         while time.time() < deadline:
             time.sleep(4)
             if not conversation_id:
@@ -438,6 +456,7 @@ def run_worker(
                 set_state(run_id, status="pr_found", pr_url=pr_url)
                 return
 
+            # Terminal statuses with no PR URL: the run ended without opening one.
             if execution_status in ("finished", "error", "stopped", "stuck"):
                 set_state(run_id, status=execution_status)
                 return
@@ -575,6 +594,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         run_id = uuid.uuid4().hex
+        # Register the run before the worker starts so the first status poll
+        # cannot race ahead of it and see "unknown run".
         with RUNS_LOCK:
             RUNS[run_id] = {
                 "run_id": run_id,
@@ -585,6 +606,7 @@ class Handler(BaseHTTPRequestHandler):
                 "created_at": time.time(),
             }
         prompt = build_prompt(repo, branch, instruction, provider)
+        # The worker outlives this request; 202 tells the page to start polling.
         threading.Thread(
             target=run_worker,
             args=(run_id, prompt, repo, branch, provider, token),
