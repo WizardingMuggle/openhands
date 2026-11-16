@@ -10,8 +10,11 @@ your browser  ->  local bridge (server.py, port 8765)  ->  OpenHands Cloud API
        +---------------- status + PR link <-----------------------+
 ```
 
-The page is served by the bridge, so there is nothing to install and no
-frontend build step. Only the Python standard library is used.
+The page is served by the bridge, so there is nothing to install to run it and
+no frontend build step at run time. Only the Python standard library is used on
+the server. The page's client logic lives in `app.ts` and is compiled to the
+committed `app.js`, which the page loads; editing `app.ts` means re-running the
+build (see [Front-end source](#front-end-source)).
 
 ## How it works
 
@@ -52,6 +55,22 @@ Open <http://localhost:8765> in your browser and press the button.
 - Azure DevOps: `organization/project/repository`, for example
   `contoso/web/PetStore` (the same shape OpenHands uses). Azure DevOps Services
   at `https://dev.azure.com` is supported; Azure DevOps Server is not.
+
+## Front-end source
+
+The page's client logic lives in `app.ts`. It is compiled to `app.js`, which is
+committed and loaded by `index.html`, so running the bridge needs no Node.js or
+build step. The server serves `app.js` from the same directory as `server.py`.
+
+Only edit `app.ts`; regenerate `app.js` after a change:
+
+```bash
+npm install       # once, installs TypeScript
+npm run build     # runs tsc -p tsconfig.json
+```
+
+`tsconfig.json` compiles `app.ts` to `app.js` with comments preserved, so the
+generated file stays readable.
 
 ## Embedding in an existing web app
 
