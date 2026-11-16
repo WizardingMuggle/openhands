@@ -1,0 +1,12 @@
+{
+  "name": "button-to-pull-request",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Front-end build for the Button to Pull Request bridge page.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

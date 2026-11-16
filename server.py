@@ -489,11 +489,25 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, obj: dict) -> None:
         self._send(code, "application/json", json.dumps(obj).encode())
 
+    # Static assets the page needs, mapped to their content type. Only files
+    # next to this server are reachable, and only those named here, so the
+    # handler never serves an arbitrary path from disk.
+    STATIC_FILES = {
+        "/index.html": "text/html; charset=utf-8",
+        "/app.js": "text/javascript; charset=utf-8",
+    }
+
     def do_GET(self):  # noqa: N802
         path = self.path.partition("?")[0]
-        if path in ("/", "/index.html"):
-            html = (HERE / "index.html").read_bytes()
-            self._send(200, "text/html; charset=utf-8", html)
+        if path == "/":
+            path = "/index.html"  # the bare root serves the page
+        if path in self.STATIC_FILES:
+            try:
+                body = (HERE / path.lstrip("/")).read_bytes()
+            except OSError:
+                self._send_json(404, {"error": "not found"})
+                return
+            self._send(200, self.STATIC_FILES[path], body)
             return
         if path == "/api/health":
             self._send_json(
