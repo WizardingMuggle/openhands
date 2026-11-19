@@ -148,3 +148,7 @@ with the python.org installer (in `/Applications/Python 3.x/`).
   the run only.
 - The events endpoint caps `limit` at 100, which is what the fallback uses.
 - The bridge binds to `127.0.0.1`, so it is only reachable from your machine.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, team workflow, and the checks a change must pass before it lands.
