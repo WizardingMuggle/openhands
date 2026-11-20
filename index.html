@@ -46,6 +46,9 @@
   .badge.err { background: #3a1517; color: #f87171; }
   a { color: #7aa2ff; }
   .kv { margin-top: 10px; color: #98a2b3; font-size: 13px; }
+  .report { margin-top: 8px; padding: 10px 12px; background: #0f1319; border: 1px solid #262b36;
+            border-radius: 8px; font: 12px/1.5 ui-monospace, monospace; color: #cdd3dc;
+            white-space: pre-wrap; overflow-wrap: anywhere; }
   code { background: #0f1319; padding: 2px 6px; border-radius: 6px; }
 </style>
 </head>
@@ -64,9 +67,20 @@
     <input id="repo" placeholder="octocat/hello-world" autocomplete="off" />
     <div class="hint" id="repo-hint"></div>
 
-    <label for="token">Personal access token</label>
-    <input id="token" type="password" autocomplete="off" spellcheck="false" />
-    <div class="hint" id="token-hint"></div>
+    <div id="token-github-wrap">
+      <label for="token-github">GitHub personal access token</label>
+      <input id="token-github" type="password" autocomplete="off" spellcheck="false"
+             placeholder="GitHub token (ghp_...)" />
+      <div class="hint" id="token-github-hint"></div>
+    </div>
+
+    <div id="token-azure-wrap">
+      <label for="token-azure">Azure DevOps personal access token</label>
+      <input id="token-azure" type="password" autocomplete="off" spellcheck="false"
+             placeholder="Azure DevOps PAT" />
+      <div class="hint" id="token-azure-hint"></div>
+    </div>
+    <div class="hint" id="server-tokens"></div>
 
     <label for="branch">Base branch</label>
     <div class="row">
@@ -79,8 +93,53 @@
     </div>
     <div class="hint" id="branch-hint"></div>
 
-    <label for="instruction">What should the agent do?</label>
-    <textarea id="instruction" placeholder="Add a CONTRIBUTING.md with setup and test instructions."></textarea>
+    <label for="task-type">What do you want the agent to do?</label>
+    <select id="task-type">
+      <option value="user_story">User story → pull request</option>
+      <option value="pr_check">PR checker — review an existing PR</option>
+      <option value="deps">Dependency update — same major version (POC: JavaScript)</option>
+      <option value="pr_patrol">PR patrol — review every open PR</option>
+      <option value="impact">Impact / risk analysis — analyze a proposed change</option>
+    </select>
+
+    <div id="sec-story">
+      <label for="user-story">User story</label>
+      <textarea id="user-story" placeholder="As a developer, I want a CONTRIBUTING.md with setup and test instructions so that new contributors can get started quickly."></textarea>
+
+      <label for="acceptance-criteria">Acceptance criteria</label>
+      <textarea id="acceptance-criteria" placeholder="- A CONTRIBUTING.md exists at the repository root&#10;- It documents setup and test instructions&#10;- The README links to it"></textarea>
+      <div class="hint">One criterion per line. Sent with the user story to the agent as a single task.</div>
+    </div>
+
+    <div id="sec-prcheck" style="display: none;">
+      <label for="pr-url">Pull request URL</label>
+      <input id="pr-url" placeholder="https://github.com/owner/name/pull/123" autocomplete="off" />
+      <label for="check-criteria">Acceptance criteria (optional)</label>
+      <textarea id="check-criteria" placeholder="- Tests cover the new endpoint&#10;- No secrets are committed"></textarea>
+      <div class="hint">The agent reviews the PR, posts its findings as a comment on it, and the page shows the verdict.</div>
+    </div>
+
+    <div id="sec-deps" style="display: none;">
+      <label for="dep-language">Language / manifest</label>
+      <select id="dep-language">
+        <option value="javascript">JavaScript — package.json (npm)</option>
+      </select>
+      <div class="hint">POC: JavaScript only. Bumps each dependency to the latest same-major version (4.x.x → 4.y.z) and opens a PR.</div>
+    </div>
+
+    <div id="sec-patrol" style="display: none;">
+      <label for="max-prs">Max PRs to review</label>
+      <input id="max-prs" type="number" min="1" max="50" value="10" />
+      <div class="hint">Reviews up to N open PRs (oldest first) and posts one verdict comment per PR. Nothing is merged. Run it now with the button, or nightly via NIGHTLY_PATROL on the server (see README).</div>
+    </div>
+
+    <div id="sec-impact" style="display: none;">
+      <label for="impact-change">Proposed change</label>
+      <textarea id="impact-change" placeholder="Replace the in-house session auth with OAuth2 login via the identity provider, keeping the current session handling."></textarea>
+      <label for="impact-focus">Areas of particular concern (optional)</label>
+      <textarea id="impact-focus" placeholder="- Session handling&#10;- Existing login tests"></textarea>
+      <div class="hint">Read-only analysis: the agent maps the change to affected files/components and rates the risk. No PR is opened.</div>
+    </div>
 
     <button id="go">Create pull request</button>
 
@@ -108,12 +167,27 @@ const PROVIDERS = {
   },
 };
 
+// Map provider -> its token input and hint elements.
+const TOKEN_FIELDS = {
+  github: { input: "token-github", hint: "token-github-hint" },
+  azure_devops: { input: "token-azure", hint: "token-azure-hint" },
+};
+
+// The token for the currently selected provider.
+function currentToken() {
+  return $(TOKEN_FIELDS[$("provider").value].input).value.trim();
+}
+
 function applyProvider() {
   const cfg = PROVIDERS[$("provider").value];
   $("repo").placeholder = cfg.repoPlaceholder;
   $("repo-hint").textContent = `Format: ${cfg.repoHint}`;
-  $("token").placeholder = cfg.tokenLabel;
-  $("token-hint").textContent = cfg.tokenHint;
+  // Keep both token fields in the DOM but dim the one that is not in use,
+  // so both providers' tokens stay filled in when switching back and forth.
+  for (const [provider, fields] of Object.entries(TOKEN_FIELDS)) {
+    $(fields.input).parentElement.style.opacity = provider === $("provider").value ? "1" : "0.55";
+  }
+  $(TOKEN_FIELDS[$("provider").value].hint).textContent = cfg.tokenHint;
   resetBranches();
 }
 
@@ -140,7 +214,6 @@ function renderBranches(branches) {
 async function loadBranches() {
   const provider = $("provider").value;
   const repo = $("repo").value.trim();
-  const token = $("token").value.trim();
   if (!repo) {
     $("branch-hint").textContent = "Enter a repository first.";
     return;
@@ -151,7 +224,7 @@ async function loadBranches() {
     const resp = await fetch("/api/branches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, repo, token }),
+      body: JSON.stringify({ provider, repo, token: currentToken() }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
@@ -183,6 +256,9 @@ function render(run) {
   if (run.pr_url) {
     bits.push(`<div class="kv">Pull request: <a href="${run.pr_url}" target="_blank" rel="noreferrer">${run.pr_url}</a></div>`);
   }
+  if (run.summary) {
+    bits.push(`<div class="kv">Agent report:</div><pre class="report">${escapeHtml(run.summary)}</pre>`);
+  }
   el.innerHTML = bits.join(" ");
 }
 
@@ -199,21 +275,103 @@ function poll(runId) {
     .catch(() => { pollTimer = setTimeout(() => poll(runId), 5000); });
 }
 
+// Show which provider tokens the server already has from its environment,
+// so users know which fields they can leave empty.
+async function loadHealth() {
+  try {
+    const resp = await fetch("/api/health");
+    const health = await resp.json();
+    if (health.tokens) {
+      const parts = Object.entries(health.tokens).map(
+        ([provider, present]) =>
+          `${PROVIDERS[provider]?.label || provider}: ${present ? "token on server" : "no server token — paste one above"}`
+      );
+      $("server-tokens").textContent = parts.join(" · ");
+    }
+  } catch {
+    // Health is informational; ignore failures.
+  }
+}
+
 $("provider").addEventListener("change", applyProvider);
 $("load-branches").addEventListener("click", loadBranches);
 applyProvider();
+loadHealth();
+
+const TASK_SECTIONS = {
+  user_story: "sec-story",
+  pr_check: "sec-prcheck",
+  deps: "sec-deps",
+  pr_patrol: "sec-patrol",
+  impact: "sec-impact",
+};
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "\x26amp;")
+    .replace(/</g, "\x26lt;")
+    .replace(/>/g, "\x26gt;")
+    .replace(/"/g, "\x26quot;")
+    .replace(/'/g, "\x26#39;");
+}
+
+function setTaskType(taskType) {
+  for (const [value, sectionId] of Object.entries(TASK_SECTIONS)) {
+    $(sectionId).style.display = value === taskType ? "" : "none";
+  }
+  const labels = {
+    pr_check: "Review pull request",
+    pr_patrol: "Run PR patrol",
+    impact: "Analyze impact",
+  };
+  $("go").textContent = labels[taskType] || "Create pull request";
+}
+
+$("task-type").addEventListener("change", (e) => setTaskType(e.target.value));
+setTaskType($("task-type").value);
 
 $("go").addEventListener("click", async () => {
+  const taskType = $("task-type").value;
   const body = {
     provider: $("provider").value,
     repo: $("repo").value.trim(),
     branch: $("branch").value.trim(),
-    token: $("token").value.trim(),
-    instruction: $("instruction").value.trim(),
+    token: currentToken(),
+    task_type: taskType,
   };
-  if (!body.repo || !body.instruction) {
-    $("status").innerHTML = '<span class="badge err">error</span> repo and instruction are required';
-    return;
+  if (taskType === "user_story") {
+    body.user_story = $("user-story").value.trim();
+    body.acceptance_criteria = $("acceptance-criteria").value.trim();
+    if (!body.repo || !body.user_story) {
+      $("status").innerHTML = '<span class="badge err">error</span> repo and user story are required';
+      return;
+    }
+  } else if (taskType === "pr_check") {
+    body.pr_url = $("pr-url").value.trim();
+    body.acceptance_criteria = $("check-criteria").value.trim();
+    if (!body.repo || !body.pr_url) {
+      $("status").innerHTML = '<span class="badge err">error</span> repo and PR URL are required';
+      return;
+    }
+  } else if (taskType === "deps") {
+    body.dep_language = $("dep-language").value;
+    if (!body.repo) {
+      $("status").innerHTML = '<span class="badge err">error</span> repo is required';
+      return;
+    }
+  } else if (taskType === "pr_patrol") {
+    body.max_prs = $("max-prs").value || "10";
+    if (!body.repo) {
+      $("status").innerHTML = '<span class="badge err">error</span> repo is required';
+      return;
+    }
+  } else if (taskType === "impact") {
+    body.user_story = $("impact-change").value.trim();
+    body.acceptance_criteria = $("impact-focus").value.trim();
+    if (!body.repo || !body.user_story) {
+      $("status").innerHTML = '<span class="badge err">error</span> repo and proposed change are required';
+      return;
+    }
   }
   $("go").disabled = true;
   $("status").innerHTML = '<span class="badge running">queued</span>';

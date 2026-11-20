@@ -15,15 +15,68 @@ frontend build step. Only the Python standard library is used.
 
 ## How it works
 
-1. You pick a git provider (GitHub or Azure DevOps), fill in the repository, an
-   optional personal access token, a base branch, and an instruction, then press
+1. Pick a task type, a git provider (GitHub or Azure DevOps), fill in the
+   repository, an optional personal access token, and a base branch, then press
    the button. Press **Load branches** to pick the base branch from a list.
 2. The bridge (`server.py`) calls `POST /api/v1/app-conversations` on OpenHands Cloud
-   with that repository and an instruction to open a pull request.
+   with that repository and a task-specific instruction.
 3. The bridge polls the conversation, streams status back to the page, and scans
    the conversation events for a pull request URL.
 4. The page shows a live status badge, a link to the OpenHands conversation, and
    the pull request link when it appears.
+
+## Use cases
+
+### 1. User story → pull request
+
+Fill in a user story and (optionally) acceptance criteria, one per line. The
+bridge combines them into a single structured prompt: the agent implements the
+story, satisfies every criterion, and opens a pull request.
+
+### 2. PR checker (POC)
+
+Paste the URL of an existing pull request and optional acceptance criteria. The
+agent checks out the PR, reviews the diff, runs available tests/linters, and
+posts its findings as a comment on the PR itself (using your token). No new PR
+is opened; the page shows the agent's report, which ends with a final verdict
+line (`VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`).
+
+### 3. Dependency update (POC: JavaScript only)
+
+Pick the JavaScript manifest (`package.json`). The agent bumps every dependency
+and devDependency to the latest release within the **same major version**
+(4.x.x → 4.y.z), updates the lockfile, runs the test/build script if present,
+and opens a pull request with the bumps. Other languages are not supported yet.
+
+### 4. Nightly PR patrol (POC)
+
+One run reviews the open pull requests in a repository (oldest first, up to a
+max): for each PR the agent checks it out, reviews the diff, runs quick
+tests/linters, and posts one verdict comment on the PR. Nothing is merged or
+closed. The page shows the final patrol report ending with
+`PATROL SUMMARY: <approved> of <total> approved`.
+
+Run it on demand with task type `pr_patrol` (the *Max PRs* field), or schedule
+it once a day by setting `NIGHTLY_PATROL` on the server:
+
+```bash
+export NIGHTLY_PATROL='{"provider": "github", "repo": "owner/name", "hour": 2}'
+```
+
+Optional keys: `branch`, `token`, `max_prs` (default 10). POC simplifications:
+the scheduler checks the local hour every 10 minutes and keeps only an
+in-memory "already ran today" flag, so a bridge restart may run it twice, and
+results are only visible on each run's conversation link.
+
+### 5. Impact / risk analysis (POC)
+
+Paste a proposed change (or user story). The agent clones the repository and
+explores it **read-only**, then reports which components, files, tests,
+configs, and docs the change would touch, the risks with severities, and
+suggested tests, ending with a final `RISK: LOW | MEDIUM | HIGH` line. No PR is
+opened and no files are modified. Use it before sprint planning to flag risky
+stories. Task type: `impact` (the proposed change goes in the user-story
+field, focus areas in the acceptance-criteria field).
 
 ## Setup
 
@@ -33,6 +86,8 @@ Set the environment variables, then run the bridge:
 export OPENHANDS_API_KEY=...      # OpenHands Cloud API key
 export GITHUB_TOKEN=...           # optional, needed for private GitHub repos
 export AZURE_DEVOPS_TOKEN=...     # optional, needed for Azure DevOps repos
+export NIGHTLY_PATROL='{"provider":"github","repo":"owner/name","hour":2}'
+                                  # optional, schedules the nightly PR patrol (see below)
 python3 server.py
 ```
 
@@ -42,7 +97,12 @@ Open <http://localhost:8765> in your browser and press the button.
 - `GITHUB_TOKEN` / `AZURE_DEVOPS_TOKEN` are forwarded to the agent sandbox so it
   can clone and push. They also let the page list branches. Without a token, only
   public GitHub repositories work and Azure DevOps cannot list branches. You can
-  also paste a token into the page for a single run instead of exporting it.
+  also paste a token into the page instead of exporting it: the page has one
+  token field per provider and sends the one matching the selected provider,
+  so a GitHub and an Azure DevOps token can both be filled in at once. A small
+  line under the token fields shows which tokens the server already holds from
+  its environment. Page tokens win over server tokens for a single run, and
+  tokens are sent in request bodies only (never URLs or logs).
 - `CLOUD_BASE` overrides the Cloud URL (default `https://app.all-hands.dev`).
 - `BRIDGE_PORT` overrides the local port (default `8765`).
 
@@ -67,7 +127,9 @@ const resp = await fetch("http://localhost:8765/api/run", {
     repo: "owner/name",
     branch: "main",
     token: "",                     // optional; overrides the server token
-    instruction: "Add a CONTRIBUTING.md with setup and test instructions.",
+    task_type: "user_story",       // "user_story" (default), "pr_check", "deps", "pr_patrol", "impact"
+    user_story: "As a new contributor, I want a CONTRIBUTING.md so I can set up and test the project.",
+    acceptance_criteria: "- A CONTRIBUTING.md exists at the repository root\n- It documents setup and test instructions",
   }),
 });
 const { run_id } = await resp.json();
@@ -95,9 +157,9 @@ If your app runs on a different origin, add a CORS header to the bridge or proxy
 
 | Method | Path                 | Purpose                                            |
 | ------ | -------------------- | -------------------------------------------------- |
-| POST   | `/api/run`           | Start a run. Body: `provider`, `repo`, `branch`, `token`, `instruction`. |
+| POST   | `/api/run`           | Start a run. Body: `provider`, `repo`, `branch`, `token`, `task_type`, and per-task fields: `user_story` + `acceptance_criteria` (user_story, impact), `pr_url` + `acceptance_criteria` (pr_check), `dep_language` (deps), `max_prs` (pr_patrol). |
 | POST   | `/api/branches`      | List branches. Body: `provider`, `repo`, `token`.   |
-| GET    | `/api/status/{id}`   | Current status of a run, including `pr_url`.        |
+| GET    | `/api/status/{id}`   | Current status of a run, including `pr_url` and `summary` (agent's final report). |
 | GET    | `/api/health`        | Whether the API key is set and which provider tokens the server has. |
 
 ## Troubleshooting

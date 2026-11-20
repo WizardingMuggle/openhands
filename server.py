@@ -16,6 +16,9 @@ Environment:
                       Azure DevOps repositories. Optional but recommended.
   CLOUD_BASE          Default: https://app.all-hands.dev
   BRIDGE_PORT         Default: 8765
+  NIGHTLY_PATROL      Optional JSON enabling the nightly PR patrol (#12), e.g.
+                      {"provider": "github", "repo": "owner/name", "hour": 2}
+                      Starts one patrol run per day at the given local hour.
 
 Per run the page can override the token for the selected provider; the value is
 forwarded to the sandbox and never stored or logged by the bridge.
@@ -45,6 +48,10 @@ CLOUD_BASE = os.environ.get("CLOUD_BASE", "https://app.all-hands.dev").rstrip("/
 API_KEY = os.environ.get("OPENHANDS_API_KEY") or os.environ.get("OPENHANDS_CLOUD_API_KEY") or "sk-oh-X07oeOzlFPPx3uJcgsCuaVXsrZ1ocNKl"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 PORT = int(os.environ.get("BRIDGE_PORT", "8765"))
+
+# Feature #12 (POC): optional nightly PR-patrol schedule, see NIGHTLY_PATROL in
+# the module docstring. Checked every 10 minutes by nightly_patrol_loop().
+NIGHTLY_PATROL = os.environ.get("NIGHTLY_PATROL", "")
 
 # Providers the bridge knows how to talk to. GitHub is the default so existing
 # callers keep working without sending a provider field.
@@ -323,6 +330,29 @@ def scan_events_for_pr(
     return None
 
 
+def scan_final_message(conversation_id: str) -> str | None:
+    """Last agent message text — the run summary (e.g. a PR review verdict)."""
+    data = api_request("GET", f"/conversation/{conversation_id}/events/search?limit=100")
+    if not isinstance(data, dict):
+        return None
+    last_text = None
+    for event in data.get("items", []):
+        if event.get("kind") != "MessageEvent":
+            continue
+        message = event.get("llm_message") or event.get("message") or {}
+        content = message.get("content") if isinstance(message, dict) else None
+        text = None
+        if isinstance(content, list):
+            text = " ".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            ).strip()
+        elif isinstance(content, str):
+            text = content.strip()
+        if text:
+            last_text = text
+    return last_text
+
+
 def _url_matches_repo(url: str, repo: str, provider: str | None = None) -> bool:
     """True if the PR/MR URL belongs to repo (owner/name or org/project/name).
 
@@ -353,9 +383,19 @@ def get_state(run_id: str) -> dict | None:
 
 
 def run_worker(
-    run_id: str, prompt: str, repo: str, branch: str | None, provider: str, token: str
+    run_id: str,
+    prompt: str,
+    repo: str,
+    branch: str | None,
+    provider: str,
+    token: str,
+    expect_pr: bool = True,
 ) -> None:
-    """Start the Cloud conversation and poll it until a PR URL appears or it ends."""
+    """Start the Cloud conversation and poll it until a PR URL appears or it ends.
+
+    When expect_pr is False (PR checker), the run ends when the agent finishes and
+    the agent's final message is captured as the run summary.
+    """
     try:
         payload: dict = {
             "initial_message": {"content": [{"type": "text", "text": prompt}]},
@@ -431,46 +471,334 @@ def run_worker(
                 or f"{CLOUD_BASE}/canvas/conversations/{conversation_id}",
             )
 
-            pr_url = pr_url_from_record(record, conversation_id) or scan_events_for_pr(
-                conversation_id, expected_repo=repo, provider=provider
-            )
-            if pr_url:
-                set_state(run_id, status="pr_found", pr_url=pr_url)
-                return
+            if expect_pr:
+                pr_url = pr_url_from_record(
+                    record, conversation_id
+                ) or scan_events_for_pr(
+                    conversation_id, expected_repo=repo, provider=provider
+                )
+                if pr_url:
+                    set_state(run_id, status="pr_found", pr_url=pr_url)
+                    return
 
             if execution_status in ("finished", "error", "stopped", "stuck"):
-                set_state(run_id, status=execution_status)
+                summary = None
+                if not expect_pr and execution_status == "finished":
+                    try:
+                        summary = scan_final_message(conversation_id)
+                    except Exception:  # noqa: BLE001 - summary is best-effort
+                        summary = None
+                set_state(run_id, status=execution_status, summary=summary)
                 return
 
-        set_state(run_id, status="timeout", error="Timed out waiting for a pull request.")
+        timeout_error = (
+            "Timed out waiting for a pull request."
+            if expect_pr
+            else "Timed out waiting for the agent to finish."
+        )
+        set_state(run_id, status="timeout", error=timeout_error)
     except ApiError as exc:
         set_state(run_id, status="error", error=str(exc))
     except Exception as exc:  # noqa: BLE001 - surface anything to the UI
         set_state(run_id, status="error", error=f"{type(exc).__name__}: {exc}")
 
 
-def build_prompt(repo: str, branch: str | None, instruction: str, provider: str) -> str:
+def build_prompt(
+    repo: str,
+    branch: str | None,
+    user_story: str,
+    acceptance_criteria: str,
+    provider: str,
+) -> str:
     if provider == "azure_devops":
         pr_url_hint = (
             "https://dev.azure.com/<organization>/<project>/_git/<repository>/pullrequest/<number>"
         )
     else:
         pr_url_hint = "https://github.com/<owner>/<repo>/pull/<number>"
-    return (
-        "You are working in a git repository. Open a pull request when done.\n\n"
-        f"Repository: {repo}\n"
-        f"Git provider: {provider}\n"
-        f"Base branch: {branch or 'the repository default branch'}\n\n"
-        "Task:\n"
-        f"{instruction.strip()}\n\n"
-        "Requirements:\n"
-        "- Clone the repository and create a new branch for your changes.\n"
-        "- Implement the task and run any relevant tests or checks.\n"
-        "- Commit your changes and push the branch to the remote.\n"
-        "- Open a pull request against the base branch.\n"
-        "- Finish by printing the full pull request URL on its own line, "
-        f"in the form {pr_url_hint}.\n"
+    lines = [
+        "You are working in a git repository. Open a pull request when done.",
+        "",
+        f"Repository: {repo}",
+        f"Git provider: {provider}",
+        f"Base branch: {branch or 'the repository default branch'}",
+        "",
+        "User Story:",
+        user_story.strip(),
+    ]
+    criteria = [
+        line.strip().lstrip("-*• ").strip()
+        for line in (acceptance_criteria or "").splitlines()
+        if line.strip()
+    ]
+    if criteria:
+        lines.append("")
+        lines.append("Acceptance Criteria:")
+        lines.extend(f"- {criterion}" for criterion in criteria)
+    lines.extend(
+        [
+            "",
+            "Requirements:",
+            "- Clone the repository and create a new branch for your changes.",
+            "- Implement the user story and satisfy every acceptance criterion.",
+            "- Run any relevant tests or checks.",
+            "- Commit your changes and push the branch to the remote.",
+            "- Open a pull request against the base branch.",
+            "- Finish by printing the full pull request URL on its own line,",
+            f"  in the form {pr_url_hint}.",
+        ]
     )
+    return "\n".join(lines)
+
+
+TASK_TYPES = ("user_story", "pr_check", "deps", "pr_patrol", "impact")
+
+# POC: dependency updates support one language for now.
+SUPPORTED_DEP_LANGUAGES = ("javascript",)
+
+
+def build_pr_check_prompt(
+    repo: str,
+    pr_url: str,
+    criteria: str,
+    provider: str,
+    token_env: str,
+) -> str:
+    lines = [
+        "You are working in a git repository. Review an EXISTING pull request; do not open a new one.",
+        "",
+        f"Repository: {repo}",
+        f"Git provider: {provider}",
+        f"Pull request: {pr_url}",
+        "",
+        "Steps:",
+        "- Clone the repository and check out the pull request locally",
+        "  (for example with `gh pr checkout`, or by fetching the PR ref).",
+        "- Review the diff for correctness, bugs, security issues, and style.",
+        "- Run the project's tests, linters, or build if they are available.",
+        "- Post your findings as a comment (or review) on the pull request itself",
+        f"  using the {provider} API and the token in the sandbox environment",
+        f"  variable {token_env}. Keep it concise: summary, issues found, test results.",
+    ]
+    review_criteria = [
+        line.strip().lstrip("-*• ").strip()
+        for line in (criteria or "").splitlines()
+        if line.strip()
+    ]
+    if review_criteria:
+        lines.append("")
+        lines.append(
+            "Check the PR against these acceptance criteria and say, for each, whether it is met:"
+        )
+        lines.extend(f"- {criterion}" for criterion in review_criteria)
+    lines.extend(
+        [
+            "",
+            "Finish by printing a final verdict line, exactly one of:",
+            "VERDICT: APPROVED",
+            "VERDICT: CHANGES_REQUESTED",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_deps_prompt(
+    repo: str, branch: str | None, dep_language: str, provider: str
+) -> str:
+    if provider == "azure_devops":
+        pr_url_hint = (
+            "https://dev.azure.com/<organization>/<project>/_git/<repository>/pullrequest/<number>"
+        )
+    else:
+        pr_url_hint = "https://github.com/<owner>/<repo>/pull/<number>"
+    if dep_language == "javascript":
+        task_lines = [
+            "Task: Update dependencies (JavaScript / package.json).",
+            "",
+            "- Read package.json at the repository root.",
+            '- For every entry in "dependencies" and "devDependencies", bump the',
+            "  version to the latest release within the SAME major version",
+            "  (for example 4.2.1 -> 4.7.0). Never change the major version.",
+            "- Skip packages that are already at the latest same-major version.",
+            '- Apply the bumps, then run "npm install" to update package-lock.json.',
+            "- Run the project's test/build script if one exists. If a same-major",
+            "  upgrade breaks the build or tests, revert that one package.",
+        ]
+    else:  # not reachable today; SUPPORTED_DEP_LANGUAGES has one entry
+        task_lines = ["Task: Update dependencies."]
+    lines = [
+        "You are working in a git repository. Open a pull request when done.",
+        "",
+        f"Repository: {repo}",
+        f"Git provider: {provider}",
+        f"Base branch: {branch or 'the repository default branch'}",
+        "",
+    ]
+    lines.extend(task_lines)
+    lines.extend(
+        [
+            "",
+            "Requirements:",
+            "- Clone the repository and create a new branch for your changes.",
+            "- Commit your changes and push the branch to the remote.",
+            "- Open a pull request against the base branch.",
+            "- Finish by printing the full pull request URL on its own line,",
+            f"  in the form {pr_url_hint}.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_pr_patrol_prompt(
+    repo: str, branch: str | None, provider: str, token_env: str, max_prs: int
+) -> str:
+    """Feature #12 (POC): review every open PR in the repository."""
+    return "\n".join(
+        [
+            "You are working in a git repository. Patrol the open pull requests.",
+            "Do NOT open any new pull request and do NOT modify any files.",
+            "",
+            f"Repository: {repo}",
+            f"Git provider: {provider}",
+            f"Base branch for comparisons: {branch or 'the repository default branch'}",
+            f"Max PRs to review: {max_prs} (oldest first)",
+            "",
+            "Steps:",
+            f"- List the open pull requests using the {provider} API with the token",
+            f"  in the sandbox environment variable {token_env} (on GitHub, `gh pr list`",
+            "  also works). Take the oldest ones first, up to the max.",
+            "- For each PR: check it out, review the diff for correctness, bugs,",
+            "  security issues, and style, and run tests/linters if they are quick.",
+            "- Post exactly one concise comment per PR: summary, issues found, test",
+            "  results, and a final line exactly VERDICT: APPROVED or",
+            "  VERDICT: CHANGES_REQUESTED.",
+            "- Never approve, merge, close, or label anything. Comments only.",
+            "",
+            "Finish with a short patrol report: one line per PR (number, title,",
+            "verdict), then a final line exactly in this form:",
+            "PATROL SUMMARY: <approved> of <total> approved",
+        ]
+    )
+
+
+def build_impact_prompt(
+    repo: str, branch: str | None, change: str, focus: str, provider: str
+) -> str:
+    """Feature #14 (POC): map a proposed change to affected components and risk."""
+    lines = [
+        "You are analyzing a git repository. This is READ-ONLY analysis:",
+        "do not modify any files and do not create branches or pull requests.",
+        "",
+        f"Repository: {repo}",
+        f"Git provider: {provider}",
+        f"Branch to analyze: {branch or 'the repository default branch'}",
+        "",
+        "Proposed change:",
+        change.strip(),
+    ]
+    focus_areas = [
+        line.strip().lstrip("-*• ").strip()
+        for line in (focus or "").splitlines()
+        if line.strip()
+    ]
+    if focus_areas:
+        lines.append("")
+        lines.append("Areas of particular concern:")
+        lines.extend(f"- {area}" for area in focus_areas)
+    lines.extend(
+        [
+            "",
+            "Steps:",
+            "- Clone the repository and explore its structure (read only).",
+            "- Identify every component, module, and file the proposed change would",
+            "  touch, including indirect effects (tests, configs, docs, CI).",
+            "- Look at existing tests and coverage around those areas, dependencies",
+            "  that could break, and anything else that looks risky.",
+            "",
+            "Report format:",
+            "1. Affected areas - bullet list: path/component and why it is affected.",
+            "2. Risks - bullet list with severity (low/medium/high) and why.",
+            "3. Suggested tests - what to add or run before merging.",
+            "4. Estimate - small / medium / large.",
+            "",
+            "Finish with a final line exactly one of:",
+            "RISK: LOW",
+            "RISK: MEDIUM",
+            "RISK: HIGH",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def start_run(
+    provider: str,
+    repo: str,
+    branch: str | None,
+    token: str,
+    task_type: str,
+    prompt: str,
+    expect_pr: bool,
+) -> str:
+    """Create a run record and launch its worker thread. Returns the run id."""
+    run_id = uuid.uuid4().hex
+    with RUNS_LOCK:
+        RUNS[run_id] = {
+            "run_id": run_id,
+            "status": "queued",
+            "provider": provider,
+            "repo": repo,
+            "branch": branch,
+            "task_type": task_type,
+            "created_at": time.time(),
+        }
+    threading.Thread(
+        target=run_worker,
+        args=(run_id, prompt, repo, branch, provider, token, expect_pr),
+        daemon=True,
+    ).start()
+    return run_id
+
+
+# Feature #12 (POC): a bare-bones nightly scheduler. When the NIGHTLY_PATROL
+# environment variable holds JSON config, one patrol run is started per day at
+# the configured local hour. State is a single in-memory date, so a bridge
+# restart resets it (worst case: the patrol runs twice in one day).
+_PATROL_STATE = {"last_day": None}
+
+
+def nightly_patrol_loop() -> None:
+    while True:
+        try:
+            cfg = json.loads(NIGHTLY_PATROL) if NIGHTLY_PATROL.strip() else None
+            if isinstance(cfg, dict) and cfg.get("repo"):
+                now = time.localtime()
+                today = time.strftime("%Y-%m-%d", now)
+                if (
+                    now.tm_hour == int(cfg.get("hour", 2))
+                    and _PATROL_STATE["last_day"] != today
+                ):
+                    _PATROL_STATE["last_day"] = today
+                    provider = (cfg.get("provider") or DEFAULT_PROVIDER).strip()
+                    repo = str(cfg["repo"]).strip()
+                    branch = (cfg.get("branch") or "").strip() or None
+                    token = (cfg.get("token") or "").strip() or PROVIDER_TOKENS.get(
+                        provider, ""
+                    )
+                    max_prs = max(1, min(50, int(cfg.get("max_prs", 10))))
+                    prompt = build_pr_patrol_prompt(
+                        repo,
+                        branch,
+                        provider,
+                        PROVIDER_TOKEN_ENV.get(provider, "PROVIDER_TOKEN"),
+                        max_prs,
+                    )
+                    run_id = start_run(
+                        provider, repo, branch, token, "pr_patrol", prompt, False
+                    )
+                    print(f"[nightly patrol] started run {run_id} for {repo}")
+        except Exception as exc:  # noqa: BLE001 - scheduler must never crash the bridge
+            print(f"[nightly patrol] error: {exc}", file=sys.stderr)
+        time.sleep(600)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -552,9 +880,22 @@ class Handler(BaseHTTPRequestHandler):
 
         provider = (payload.get("provider") or DEFAULT_PROVIDER).strip()
         repo = (payload.get("repo") or "").strip()
+        user_story = (payload.get("user_story") or "").strip()
+        acceptance_criteria = (payload.get("acceptance_criteria") or "").strip()
         instruction = (payload.get("instruction") or "").strip()
+        # Backward compatibility: a bare instruction is treated as the user story.
+        if not user_story and instruction:
+            user_story = instruction
         branch = (payload.get("branch") or "").strip() or None
         token = (payload.get("token") or "").strip() or PROVIDER_TOKENS.get(provider, "")
+        task_type = (payload.get("task_type") or "user_story").strip() or "user_story"
+        pr_url = (payload.get("pr_url") or "").strip()
+        dep_language = (payload.get("dep_language") or "").strip() or "javascript"
+        max_prs_raw = (payload.get("max_prs") or "").strip() or "10"
+        try:
+            max_prs = max(1, min(50, int(max_prs_raw)))
+        except ValueError:
+            max_prs = 10
 
         if provider not in PROVIDERS:
             self._send_json(400, {"error": f"provider must be one of {list(PROVIDERS)}"})
@@ -567,29 +908,58 @@ class Handler(BaseHTTPRequestHandler):
             )
             self._send_json(400, {"error": f"repo must look like {example}"})
             return
-        if not instruction:
-            self._send_json(400, {"error": "instruction is required"})
+        if task_type not in TASK_TYPES:
+            self._send_json(400, {"error": f"task_type must be one of {list(TASK_TYPES)}"})
+            return
+        if task_type == "user_story" and not user_story:
+            self._send_json(400, {"error": "user_story is required"})
+            return
+        if task_type == "pr_check" and not pr_url.startswith(("http://", "https://")):
+            self._send_json(400, {"error": "pr_url must be a full pull request URL"})
+            return
+        if task_type == "deps" and dep_language not in SUPPORTED_DEP_LANGUAGES:
+            self._send_json(
+                400,
+                {
+                    "error": f"dep_language must be one of {list(SUPPORTED_DEP_LANGUAGES)}"
+                    " (POC supports JavaScript only)"
+                },
+            )
+            return
+        if task_type == "impact" and not user_story:
+            self._send_json(
+                400,
+                {
+                    "error": "user_story is required for impact analysis "
+                    "(it carries the proposed change)"
+                },
+            )
             return
         if not API_KEY:
             self._send_json(500, {"error": "OPENHANDS_API_KEY is not set on the server"})
             return
 
-        run_id = uuid.uuid4().hex
-        with RUNS_LOCK:
-            RUNS[run_id] = {
-                "run_id": run_id,
-                "status": "queued",
-                "provider": provider,
-                "repo": repo,
-                "branch": branch,
-                "created_at": time.time(),
-            }
-        prompt = build_prompt(repo, branch, instruction, provider)
-        threading.Thread(
-            target=run_worker,
-            args=(run_id, prompt, repo, branch, provider, token),
-            daemon=True,
-        ).start()
+        expect_pr = True
+        if task_type == "user_story":
+            prompt = build_prompt(repo, branch, user_story, acceptance_criteria, provider)
+        elif task_type == "pr_check":
+            prompt = build_pr_check_prompt(
+                repo, pr_url, acceptance_criteria, provider, PROVIDER_TOKEN_ENV[provider]
+            )
+            expect_pr = False
+        elif task_type == "deps":
+            prompt = build_deps_prompt(repo, branch, dep_language, provider)
+        elif task_type == "pr_patrol":
+            prompt = build_pr_patrol_prompt(
+                repo, branch, provider, PROVIDER_TOKEN_ENV[provider], max_prs
+            )
+            expect_pr = False
+        else:  # impact
+            prompt = build_impact_prompt(
+                repo, branch, user_story, acceptance_criteria, provider
+            )
+            expect_pr = False
+        run_id = start_run(provider, repo, branch, token, task_type, prompt, expect_pr)
         self._send_json(202, {"run_id": run_id})
 
 
@@ -600,6 +970,9 @@ def main() -> None:
             "         export OPENHANDS_API_KEY=... then restart.",
             file=sys.stderr,
         )
+    if NIGHTLY_PATROL:
+        threading.Thread(target=nightly_patrol_loop, daemon=True).start()
+        print(f"Nightly PR patrol enabled: {NIGHTLY_PATROL}")
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Bridge running at http://localhost:{PORT}")
     print(f"Cloud API base: {CLOUD_BASE}")
